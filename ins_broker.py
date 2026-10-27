@@ -1,66 +1,78 @@
+# =====================================================================
+# Oman Insurance Broker – Full IFRS + CMA Financial Reporting Demo
+# =====================================================================
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import io
 import uuid
-import math
 
-# PDF
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
-
-# PPTX
-from pptx import Presentation
-from pptx.util import Inches
-
-# -------------------------------------------------------------------
-# CONFIG
-# -------------------------------------------------------------------
 st.set_page_config(page_title="Oman Insurance Broker FS", page_icon="🇴🇲", layout="wide")
 
+# ---------- Optional imports ----------
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    REPORTLAB_OK = True
+except ImportError:
+    REPORTLAB_OK = False
+
+try:
+    from pptx import Presentation
+    from pptx.util import Inches
+    PPTX_OK = True
+except ImportError:
+    PPTX_OK = False
+
+# =====================================================================
+# CONSTANTS
+# =====================================================================
 VAT_RATE = 0.05
 ECL_RATES = {"current": 0.005, "30": 0.02, "60": 0.05, "90": 0.15, "120+": 0.30}
+MIN_CAPITAL = 50000.0   # CMA Article 26 (insurance brokerage)
+MIN_CAPITAL_COMBINED = 75000.0
 
 CHART_OF_ACCOUNTS = {
     # Assets
-    "1000": "Cash - Insurance Brokerage Account (Client Funds)",
-    "1010": "Cash - Operating Account",
-    "1020": "Bank - Operating Account",
-    "1100": "Accounts Receivable - Commissions",
+    "1000": "Cash – Insurance Brokerage Account (Client Funds)",
+    "1010": "Cash – Operating Account",
+    "1020": "Bank – Operating Account",
+    "1100": "Accounts Receivable – Commissions (net of ECL)",
     "1110": "VAT Receivable (Input)",
     "1120": "Right-of-Use Asset (Net)",
     "1130": "Prepaid Expenses",
     "1140": "Fixed Assets (Net)",
     # Liabilities
-    "2000": "Accounts Payable - Insurers (Premiums)",
-    "2010": "Accounts Payable - Clients (Claims)",
+    "2000": "Accounts Payable – Insurers (Premiums)",
+    "2010": "Accounts Payable – Clients (Claims)",
     "2100": "Accrued Expenses",
     "2110": "VAT Payable (Output)",
-    "2120": "Lease Liability - Current",
-    "2130": "Lease Liability - Non-Current",
+    "2120": "Lease Liability – Current",
+    "2130": "Lease Liability – Non-Current",
     "2200": "Loans Payable",
     # Equity
     "3000": "Share Capital",
     "3100": "Retained Earnings",
     "3200": "Current Year Profit/Loss",
     # Revenue
-    "4000": "Commission Income - Insurance",
-    "4010": "Commission Income - Reinsurance",
+    "4000": "Commission Income – Insurance",
+    "4010": "Commission Income – Reinsurance",
     "4020": "Fee Income",
     # Expenses
     "5000": "Salaries and Benefits",
-    "5010": "Depreciation - ROU Asset",
-    "5020": "Interest Expense - Lease",
+    "5010": "Depreciation – ROU Asset",
+    "5020": "Interest Expense – Lease",
     "5030": "ECL Impairment Loss",
     "5040": "Utilities",
     "5050": "Professional Fees (Audit/Legal)",
     "5060": "Marketing",
     "5070": "Bank Charges",
-    "5080": "Other Operating Expenses",
+    "5080": "Rent Expense (short-term leases)",
+    "5090": "Other Operating Expenses",
 }
 
 DEFAULT_BALANCES = {
@@ -71,12 +83,13 @@ DEFAULT_BALANCES = {
     "3000": 50000.0, "3100": 5000.0, "3200": 0.0,
     "4000": 0.0, "4010": 0.0, "4020": 0.0,
     "5000": 0.0, "5010": 0.0, "5020": 0.0, "5030": 0.0,
-    "5040": 0.0, "5050": 0.0, "5060": 0.0, "5070": 0.0, "5080": 0.0,
+    "5040": 0.0, "5050": 0.0, "5060": 0.0, "5070": 0.0,
+    "5080": 0.0, "5090": 0.0,
 }
 
-# -------------------------------------------------------------------
+# =====================================================================
 # SESSION STATE
-# -------------------------------------------------------------------
+# =====================================================================
 if "balances" not in st.session_state:
     st.session_state.balances = DEFAULT_BALANCES.copy()
 if "journal_entries" not in st.session_state:
@@ -92,9 +105,9 @@ if "lease" not in st.session_state:
 if "audit_adjustments" not in st.session_state:
     st.session_state.audit_adjustments = []
 
-# -------------------------------------------------------------------
+# =====================================================================
 # HELPERS
-# -------------------------------------------------------------------
+# =====================================================================
 def fmt(v):
     return f"{v:,.3f} OMR"
 
@@ -126,32 +139,27 @@ def post_journal(entry_date, description, lines):
     })
     return True, f"Posted {fmt(total_dr)}"
 
-# -------------------------------------------------------------------
-# INITIAL SAMPLE DATA (Accrual basis)
-# -------------------------------------------------------------------
+# =====================================================================
+# SAMPLE DATA
+# =====================================================================
 def init_sample():
     if st.session_state.journal_entries:
         return
     entries = [
-        # Accrued commission (IFRS 15: point-in-time when policy bound)
-        (date(2026, 1, 15), "Commission accrued - Motor fleet policy bound",
+        (date(2026, 1, 15), "Commission accrued – Motor fleet policy bound",
          [{"account": "1100", "debit": 1250.0, "credit": 0},
           {"account": "4000", "debit": 0, "credit": 1250.0}]),
-        # VAT on commission
         (date(2026, 1, 15), "Output VAT on commission (5%)",
          [{"account": "1100", "debit": 62.5, "credit": 0},
           {"account": "2110", "debit": 0, "credit": 62.5}]),
-        # Commission received
         (date(2026, 2, 1), "Commission received from insurer",
          [{"account": "1020", "debit": 1312.5, "credit": 0},
           {"account": "1100", "debit": 0, "credit": 1312.5}]),
-        # Accrued audit fee
         (date(2026, 3, 31), "Accrual: statutory audit fee for FY2026",
          [{"account": "5050", "debit": 1500.0, "credit": 0},
           {"account": "2100", "debit": 0, "credit": 1500.0}]),
-        # Rent accrual
         (date(2026, 3, 31), "Accrual: March office rent",
-         [{"account": "5040", "debit": 900.0, "credit": 0},
+         [{"account": "5080", "debit": 900.0, "credit": 0},
           {"account": "2100", "debit": 0, "credit": 900.0}]),
     ]
     for d, desc, lines in entries:
@@ -159,34 +167,34 @@ def init_sample():
 
 init_sample()
 
-# -------------------------------------------------------------------
-# ECL CALCULATOR (IFRS 9 Simplified Approach)
-# -------------------------------------------------------------------
+# =====================================================================
+# ECL
+# =====================================================================
 def compute_ecl():
     ar = get_bal("1100")
     if ar <= 0:
         return 0.0, []
     buckets = [
         ("Current", 0, 30, ECL_RATES["current"]),
-        ("1-30 days", 30, 60, ECL_RATES["30"]),
-        ("31-60 days", 60, 90, ECL_RATES["60"]),
-        ("61-90 days", 90, 120, ECL_RATES["90"]),
+        ("1–30 days", 30, 60, ECL_RATES["30"]),
+        ("31–60 days", 60, 90, ECL_RATES["60"]),
+        ("61–90 days", 90, 120, ECL_RATES["90"]),
         ("90+ days", 120, 9999, ECL_RATES["120+"]),
     ]
-    # Simplified: assume 60% current, 25% 1-30, 10% 31-60, 5% 61-90
     splits = [0.60, 0.25, 0.10, 0.05, 0.00]
     ecl_details = []
     total_ecl = 0.0
     for i, (label, low, high, rate) in enumerate(buckets):
         gross = ar * splits[i]
         loss = gross * rate
-        ecl_details.append({"Bucket": label, "Gross (OMR)": gross, "Rate": f"{rate*100:.1f}%", "ECL (OMR)": loss})
+        ecl_details.append({"Bucket": label, "Gross (OMR)": gross,
+                            "Rate": f"{rate*100:.1f}%", "ECL (OMR)": loss})
         total_ecl += loss
     return total_ecl, ecl_details
 
-# -------------------------------------------------------------------
-# LEASE CALCULATOR (IFRS 16)
-# -------------------------------------------------------------------
+# =====================================================================
+# IFRS 16 LEASE
+# =====================================================================
 def setup_lease(annual_payment, term_years, rate):
     pv = annual_payment * (1 - (1 + rate) ** -term_years) / rate
     st.session_state.lease = {
@@ -200,8 +208,8 @@ def setup_lease(annual_payment, term_years, rate):
         "year": 0,
         "schedule": [],
     }
-    # Post initial recognition
-    post_journal(date.today(), "IFRS 16: Initial recognition of office lease ROU asset and liability",
+    post_journal(date.today(),
+                 "IFRS 16 – Initial recognition of office lease (ROU asset & liability)",
                  [{"account": "1120", "debit": pv, "credit": 0},
                   {"account": "2130", "debit": 0, "credit": pv}])
 
@@ -215,14 +223,13 @@ def run_lease_year():
     dep = L["initial_rou"] / L["term"]
     new_rou = L["rou_balance"] - dep
 
-    # Post interest, depreciation, payment
-    post_journal(date.today(), f"IFRS 16 Year {L['year']+1}: Interest accretion",
+    post_journal(date.today(), f"IFRS 16 Year {L['year']+1} – Interest accretion",
                  [{"account": "5020", "debit": interest, "credit": 0},
                   {"account": "2130", "debit": 0, "credit": interest}])
-    post_journal(date.today(), f"IFRS 16 Year {L['year']+1}: ROU depreciation",
+    post_journal(date.today(), f"IFRS 16 Year {L['year']+1} – ROU depreciation",
                  [{"account": "5010", "debit": dep, "credit": 0},
                   {"account": "1120", "debit": 0, "credit": dep}])
-    post_journal(date.today(), f"IFRS 16 Year {L['year']+1}: Lease payment",
+    post_journal(date.today(), f"IFRS 16 Year {L['year']+1} – Lease payment (principal)",
                  [{"account": "2130", "debit": principal, "credit": 0},
                   {"account": "1020", "debit": 0, "credit": principal}])
 
@@ -236,68 +243,209 @@ def run_lease_year():
     L["rou_balance"] = new_rou
     L["year"] += 1
 
-# -------------------------------------------------------------------
-# AUDIT ADJUSTMENT
-# -------------------------------------------------------------------
+# =====================================================================
+# AUDIT
+# =====================================================================
 def post_audit_adjustment(desc, lines):
     ok, msg = post_journal(date.today(), f"[AUDIT ADJ] {desc}", lines)
     if ok:
         st.session_state.audit_adjustments.append({"desc": desc, "lines": lines})
     return ok, msg
 
-# -------------------------------------------------------------------
+# =====================================================================
+# PDF GENERATOR
+# =====================================================================
+def generate_pdf_document(doc_type, doc_data):
+    if not REPORTLAB_OK:
+        return None
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm,
+                            topMargin=20*mm, bottomMargin=20*mm)
+    styles = getSampleStyleSheet()
+    elements = []
+    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=18,
+                                  alignment=TA_CENTER, spaceAfter=20)
+    elements.append(Paragraph(f"<b>{doc_type.upper()}</b>", title_style))
+    elements.append(Spacer(1, 10))
+    company = [
+        ["<b>Al Noor Insurance Brokerage LLC</b>", ""],
+        ["Muscat, Sultanate of Oman", ""],
+        ["VAT No: OM1100XXXXXX", ""],
+    ]
+    t = Table(company, colWidths=[100*mm, 60*mm])
+    t.setStyle(TableStyle([('FONTSIZE', (0, 0), (-1, -1), 9),
+                           ('ALIGN', (0, 0), (0, -1), 'LEFT')]))
+    elements.append(t)
+    elements.append(Spacer(1, 15))
+    details = [
+        ["<b>Document No:</b>", doc_data.get("doc_no", "N/A")],
+        ["<b>Date:</b>", str(doc_data.get("date", date.today()))],
+        ["<b>Party:</b>", doc_data.get("party", "N/A")],
+        ["<b>Reference:</b>", doc_data.get("reference", "N/A")],
+    ]
+    t2 = Table(details, colWidths=[40*mm, 120*mm])
+    t2.setStyle(TableStyle([('FONTSIZE', (0, 0), (-1, -1), 10),
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                            ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey)]))
+    elements.append(t2)
+    elements.append(Spacer(1, 15))
+    items = doc_data.get("items", [])
+    if items:
+        data = [["Description", "Amount (OMR)"]]
+        data += [[i["desc"], f"{i['amount']:,.3f}"] for i in items]
+        subtotal = sum(i["amount"] for i in items)
+        vat = doc_data.get("vat", 0)
+        data += [["", ""], ["<b>Subtotal</b>", f"<b>{subtotal:,.3f}</b>"]]
+        if vat > 0:
+            data.append(["<b>VAT (5%)</b>", f"<b>{vat:,.3f}</b>"])
+        data.append(["<b>Total</b>", f"<b>{subtotal + vat:,.3f}</b>"])
+        t3 = Table(data, colWidths=[120*mm, 40*mm])
+        t3.setStyle(TableStyle([
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a5490')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ]))
+        elements.append(t3)
+    elements.append(Spacer(1, 30))
+    elements.append(Paragraph(
+        "<i>Computer-generated document. No signature required.</i>",
+        ParagraphStyle('F', parent=styles['Normal'], fontSize=8,
+                       alignment=TA_CENTER, textColor=colors.grey)))
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+# =====================================================================
+# EXCEL EXPORT
+# =====================================================================
+def generate_excel_report():
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine='xlsxwriter') as w:
+        pd.DataFrame([{"Code": k, "Account": v, "Balance (OMR)": st.session_state.balances[k]}
+                      for k, v in CHART_OF_ACCOUNTS.items()]).to_excel(w, sheet_name='Trial Balance', index=False)
+        if st.session_state.journal_entries:
+            rows = []
+            for je in st.session_state.journal_entries:
+                for l in je["lines"]:
+                    rows.append({"Date": je["date"], "Journal ID": je["id"],
+                                 "Description": je["description"], "Account": l["account"],
+                                 "Account Name": CHART_OF_ACCOUNTS.get(l["account"], ""),
+                                 "Debit": l["debit"], "Credit": l["credit"]})
+            pd.DataFrame(rows).to_excel(w, sheet_name='Journal', index=False)
+        rev = {k: v for k, v in st.session_state.balances.items() if k.startswith("4")}
+        exp = {k: v for k, v in st.session_state.balances.items() if k.startswith("5")}
+        pl = [{"Account": CHART_OF_ACCOUNTS[k], "Amount": v} for k, v in rev.items()]
+        pl.append({"Account": "TOTAL REVENUE", "Amount": sum(rev.values())})
+        pl.append({"Account": "", "Amount": 0})
+        pl += [{"Account": CHART_OF_ACCOUNTS[k], "Amount": v} for k, v in exp.items()]
+        pl.append({"Account": "TOTAL EXPENSES", "Amount": sum(exp.values())})
+        pl.append({"Account": "NET PROFIT / (LOSS)", "Amount": sum(rev.values()) - sum(exp.values())})
+        pd.DataFrame(pl).to_excel(w, sheet_name='P&L', index=False)
+        if st.session_state.lease and st.session_state.lease["schedule"]:
+            pd.DataFrame(st.session_state.lease["schedule"]).to_excel(w, sheet_name='Lease Schedule', index=False)
+    out.seek(0)
+    return out
+
+# =====================================================================
+# PPTX EXPORT
+# =====================================================================
+def generate_pptx_report():
+    if not PPTX_OK:
+        return None
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    s = prs.slides.add_slide(prs.slide_layouts[0])
+    s.shapes.title.text = "Oman Insurance Broker"
+    s.placeholders[1].text = f"Financial Summary\n{date.today().strftime('%d %B %Y')}"
+
+    total_assets = sum(v for k, v in st.session_state.balances.items() if k.startswith("1") and k != "1000")
+    total_liab = sum(v for k, v in st.session_state.balances.items() if k.startswith("2"))
+    net = total_assets - total_liab
+    rev = sum(v for k, v in st.session_state.balances.items() if k.startswith("4"))
+    exp = sum(v for k, v in st.session_state.balances.items() if k.startswith("5"))
+
+    s = prs.slides.add_slide(prs.slide_layouts[1])
+    s.shapes.title.text = "Key Financial Metrics"
+    tf = s.placeholders[1].text_frame
+    tf.text = f"Total Assets: {fmt(total_assets)}"
+    for line in [f"Total Liabilities: {fmt(total_liab)}",
+                 f"Net Assets: {fmt(net)}",
+                 f"Revenue: {fmt(rev)}",
+                 f"Expenses: {fmt(exp)}",
+                 f"Net Profit/(Loss): {fmt(rev-exp)}"]:
+        p = tf.add_paragraph()
+        p.text = line
+
+    s = prs.slides.add_slide(prs.slide_layouts[1])
+    s.shapes.title.text = "CMA Compliance Check"
+    tf = s.placeholders[1].text_frame
+    status = "✅ MET" if net >= MIN_CAPITAL else "⚠️ NOT MET"
+    tf.text = f"Minimum Net Assets: {fmt(MIN_CAPITAL)}"
+    for line in [f"Actual Net Assets: {fmt(net)}", f"Status: {status}"]:
+        p = tf.add_paragraph()
+        p.text = line
+
+    out = io.BytesIO()
+    prs.save(out)
+    out.seek(0)
+    return out
+
+# =====================================================================
 # NAVIGATION
-# -------------------------------------------------------------------
+# =====================================================================
 st.sidebar.title("🏦 Insurance Broker FS")
 st.sidebar.caption("Oman CMA · Full IFRS")
+
+if not REPORTLAB_OK:
+    st.sidebar.warning("reportlab not installed – PDF disabled")
+if not PPTX_OK:
+    st.sidebar.warning("python-pptx not installed – PPTX disabled")
+
 menu = st.sidebar.radio("Navigation", [
     "📊 Dashboard", "📥 Journal Entry", "📄 Documents",
     "🔧 Accruals & ECL", "🏢 Lease (IFRS 16)",
     "🔍 Statutory Audit", "📑 Reports", "📚 IFRS Notes"
 ])
 
-# -------------------------------------------------------------------
+# =====================================================================
 # DASHBOARD
-# -------------------------------------------------------------------
+# =====================================================================
 if menu == "📊 Dashboard":
     st.title("Dashboard")
     assets = sum(v for k, v in st.session_state.balances.items() if k.startswith("1") and k != "1000")
     liab = sum(v for k, v in st.session_state.balances.items() if k.startswith("2"))
     net = assets - liab
-
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Assets (excl. client funds)", fmt(assets))
     c2.metric("Total Liabilities", fmt(liab))
     c3.metric("Net Assets", fmt(net))
-
     st.subheader("CMA Article 26 Solvency Test")
-    min_cap = 50000.0
-    # Exclude intangibles per CMA
-    intangibles = get_bal("1120")  # ROU is not intangible, but adjust if needed
-    if net >= min_cap:
-        st.success(f"✅ MET: {fmt(net)} ≥ {fmt(min_cap)}")
+    if net >= MIN_CAPITAL:
+        st.success(f"✅ MET: {fmt(net)} ≥ {fmt(MIN_CAPITAL)}")
     else:
-        st.error(f"⚠️ NOT MET: {fmt(net)} < {fmt(min_cap)}")
+        st.error(f"⚠️ NOT MET: {fmt(net)} < {fmt(MIN_CAPITAL)}")
+    st.info("Client funds (Account 1000) excluded from broker net assets per CMA Article 25.")
 
-# -------------------------------------------------------------------
+# =====================================================================
 # JOURNAL ENTRY
-# -------------------------------------------------------------------
+# =====================================================================
 elif menu == "📥 Journal Entry":
     st.title("Multi-Line Double-Entry Journal")
-
     if "jlines" not in st.session_state:
         st.session_state.jlines = [{"account": "1010", "debit": 0.0, "credit": 0.0},
                                    {"account": "4000", "debit": 0.0, "credit": 0.0}]
-
-    col_a, col_b = st.columns(2)
-    if col_a.button("➕ Add Line"):
+    ca, cb = st.columns(2)
+    if ca.button("➕ Add Line"):
         st.session_state.jlines.append({"account": "4000", "debit": 0.0, "credit": 0.0})
         st.rerun()
-    if col_b.button("➖ Remove Last"):
+    if cb.button("➖ Remove Last"):
         if len(st.session_state.jlines) > 2:
             st.session_state.jlines.pop()
             st.rerun()
-
     with st.form("jform"):
         ed = st.date_input("Date", date.today())
         desc = st.text_input("Description")
@@ -305,8 +453,8 @@ elif menu == "📥 Journal Entry":
         for i, ln in enumerate(st.session_state.jlines):
             c1, c2, c3 = st.columns([3, 1, 1])
             acct = c1.selectbox(f"Account {i+1}", list(CHART_OF_ACCOUNTS.keys()),
-                               index=list(CHART_OF_ACCOUNTS.keys()).index(ln["account"]),
-                               format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}", key=f"a{i}")
+                                index=list(CHART_OF_ACCOUNTS.keys()).index(ln["account"]),
+                                format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}", key=f"a{i}")
             dr = c2.number_input("Debit", min_value=0.0, step=1.0, value=float(ln["debit"]), key=f"d{i}")
             cr = c3.number_input("Credit", min_value=0.0, step=1.0, value=float(ln["credit"]), key=f"c{i}")
             lines.append({"account": acct, "debit": dr, "credit": cr})
@@ -322,7 +470,6 @@ elif menu == "📥 Journal Entry":
                 st.rerun()
             else:
                 st.error(msg)
-
     if st.session_state.journal_entries:
         st.subheader("Recent Entries")
         for je in reversed(st.session_state.journal_entries[-8:]):
@@ -333,15 +480,16 @@ elif menu == "📥 Journal Entry":
                     for l in je["lines"] if l["debit"] or l["credit"]
                 ]), use_container_width=True, hide_index=True)
 
-# -------------------------------------------------------------------
+# =====================================================================
 # DOCUMENTS
-# -------------------------------------------------------------------
+# =====================================================================
 elif menu == "📄 Documents":
     st.title("Document Generation")
-    doc_type = st.selectbox("Type", ["VAT Invoice (Commission)", "Invoice", "Debit Note", "Credit Note", "Receipt"])
-    col1, col2 = st.columns(2)
-    party = col1.text_input("Party", "Dhofar Insurance")
-    ref = col2.text_input("Reference", "POL-2026-001")
+    doc_type = st.selectbox("Type", ["VAT Invoice (Commission)", "Invoice",
+                                     "Debit Note", "Credit Note", "Receipt"])
+    c1, c2 = st.columns(2)
+    party = c1.text_input("Party", "Dhofar Insurance")
+    ref = c2.text_input("Reference", "POL-2026-001")
     desc = st.text_input("Description", "Commission – Motor fleet")
     amt = st.number_input("Amount (OMR)", min_value=0.0, value=1250.0, step=10.0)
     apply_vat = st.checkbox("VAT 5%", value=(doc_type == "VAT Invoice (Commission)"))
@@ -355,16 +503,24 @@ elif menu == "📄 Documents":
         st.session_state.documents.append(doc)
         st.success(f"{doc_no} – {fmt(doc['total'])}")
 
-    if st.session_state.documents:
-        st.dataframe(pd.DataFrame([{"No": d["doc_no"], "Type": d["type"], "Party": d["party"], "Total": d["total"]}
-                                   for d in st.session_state.documents]), use_container_width=True)
+        pdf_buf = generate_pdf_document(doc_type, doc)
+        if pdf_buf:
+            st.download_button("⬇️ Download PDF", data=pdf_buf,
+                               file_name=f"{doc_no}.pdf", mime="application/pdf")
+        else:
+            st.info("PDF export unavailable – install reportlab via requirements.txt.")
 
-# -------------------------------------------------------------------
+    if st.session_state.documents:
+        st.dataframe(pd.DataFrame([{"No": d["doc_no"], "Type": d["type"],
+                                    "Party": d["party"], "Total": d["total"]}
+                                   for d in st.session_state.documents]),
+                     use_container_width=True)
+
+# =====================================================================
 # ACCRUALS & ECL
-# -------------------------------------------------------------------
+# =====================================================================
 elif menu == "🔧 Accruals & ECL":
     st.title("Accruals & Expected Credit Loss (IFRS 9)")
-
     tab1, tab2 = st.tabs(["📅 Accruals", "📉 ECL Provision Matrix"])
 
     with tab1:
@@ -372,7 +528,7 @@ elif menu == "🔧 Accruals & ECL":
         with st.form("accrual_form"):
             acc_date = st.date_input("Accrual Date", date.today())
             acc_desc = st.text_input("Description", "Accrued audit fee")
-            exp_acct = st.selectbox("Expense Account", ["5050", "5040", "5000", "5080"],
+            exp_acct = st.selectbox("Expense Account", ["5050", "5040", "5000", "5090"],
                                     format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}")
             acc_amt = st.number_input("Amount (OMR)", min_value=0.0, value=1500.0, step=100.0)
             if st.form_submit_button("Post Accrual"):
@@ -382,7 +538,6 @@ elif menu == "🔧 Accruals & ECL":
                 if ok:
                     st.session_state.accruals.append({"date": acc_date, "desc": acc_desc, "amount": acc_amt})
                     st.success(msg)
-
         if st.session_state.accruals:
             st.dataframe(pd.DataFrame(st.session_state.accruals), use_container_width=True)
 
@@ -390,38 +545,32 @@ elif menu == "🔧 Accruals & ECL":
         st.subheader("ECL Calculator (Simplified Approach)")
         ar = get_bal("1100")
         st.write(f"Gross Accounts Receivable (1100): **{fmt(ar)}**")
-
         if st.button("Compute ECL"):
             ecl, details = compute_ecl()
             st.session_state.ecl_allowance = ecl
             st.dataframe(pd.DataFrame(details), use_container_width=True, hide_index=True)
             st.metric("Total ECL Allowance Required", fmt(ecl))
-
         if st.session_state.ecl_allowance > 0:
             if st.button("Post ECL Adjustment"):
-                # Move allowance to target
-                current_allowance = 0.0  # simplified: track separately
-                delta = st.session_state.ecl_allowance - current_allowance
-                if delta > 0:
-                    lines = [{"account": "5030", "debit": delta, "credit": 0},
-                             {"account": "1100", "debit": 0, "credit": delta}]
-                    ok, msg = post_journal(date.today(), "IFRS 9 ECL impairment allowance", lines)
-                    if ok:
-                        st.success(f"ECL posted: {fmt(delta)}")
+                delta = st.session_state.ecl_allowance
+                lines = [{"account": "5030", "debit": delta, "credit": 0},
+                         {"account": "1100", "debit": 0, "credit": delta}]
+                ok, msg = post_journal(date.today(), "IFRS 9 ECL impairment allowance", lines)
+                if ok:
+                    st.success(f"ECL posted: {fmt(delta)}")
+                    st.session_state.ecl_allowance = 0.0
 
-# -------------------------------------------------------------------
-# LEASE (IFRS 16)
-# -------------------------------------------------------------------
+# =====================================================================
+# LEASE
+# =====================================================================
 elif menu == "🏢 Lease (IFRS 16)":
     st.title("IFRS 16 Lease Accounting")
-
     if st.session_state.lease is None:
         st.subheader("Set Up Office Lease")
-        col1, col2, col3 = st.columns(3)
-        annual = col1.number_input("Annual Lease Payment (OMR)", value=12000.0, step=1000.0)
-        term = col2.number_input("Lease Term (years)", value=5, min_value=1, max_value=20)
-        rate = col3.number_input("Incremental Borrowing Rate (%)", value=6.0, step=0.5) / 100
-
+        c1, c2, c3 = st.columns(3)
+        annual = c1.number_input("Annual Lease Payment (OMR)", value=12000.0, step=1000.0)
+        term = c2.number_input("Lease Term (years)", value=5, min_value=1, max_value=20)
+        rate = c3.number_input("Incremental Borrowing Rate (%)", value=6.0, step=0.5) / 100
         if st.button("Recognise Lease"):
             setup_lease(annual, term, rate)
             st.success("ROU asset and lease liability recognised.")
@@ -433,37 +582,34 @@ elif menu == "🏢 Lease (IFRS 16)":
         c1.metric("ROU Asset Balance", fmt(L["rou_balance"]))
         c2.metric("Lease Liability", fmt(L["liability_balance"]))
         c3.metric("Year", f"{L['year']} / {L['term']}")
-
         if L["year"] < L["term"]:
             if st.button(f"Run Year {L['year']+1} Entries"):
                 run_lease_year()
                 st.rerun()
         else:
             st.info("Lease fully amortised.")
-
         if L["schedule"]:
             st.subheader("Amortisation Schedule")
             st.dataframe(pd.DataFrame(L["schedule"]), use_container_width=True, hide_index=True)
-
         if st.button("Reset Lease"):
             st.session_state.lease = None
             st.rerun()
 
-# -------------------------------------------------------------------
+# =====================================================================
 # STATUTORY AUDIT
-# -------------------------------------------------------------------
+# =====================================================================
 elif menu == "🔍 Statutory Audit":
     st.title("Statutory Audit Workpaper")
-    st.caption("CMA Article 16 requires an auditor accredited by the Authority [citation:4]")
+    st.caption("CMA Article 16 requires an auditor accredited by the Authority.")
 
     st.subheader("Audit Adjustments")
     with st.form("audit_adj"):
         adj_desc = st.text_input("Adjustment Description", "Reclassification of prepaid rent")
-        col1, col2 = st.columns(2)
-        dr_acct = col1.selectbox("Debit Account", list(CHART_OF_ACCOUNTS.keys()),
-                                 format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}")
-        cr_acct = col2.selectbox("Credit Account", list(CHART_OF_ACCOUNTS.keys()),
-                                 format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}", index=10)
+        c1, c2 = st.columns(2)
+        dr_acct = c1.selectbox("Debit Account", list(CHART_OF_ACCOUNTS.keys()),
+                               format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}")
+        cr_acct = c2.selectbox("Credit Account", list(CHART_OF_ACCOUNTS.keys()),
+                               format_func=lambda x: f"{x} – {CHART_OF_ACCOUNTS[x]}", index=10)
         adj_amt = st.number_input("Amount (OMR)", min_value=0.0, value=500.0, step=100.0)
         if st.form_submit_button("Post Audit Adjustment"):
             lines = [{"account": dr_acct, "debit": adj_amt, "credit": 0},
@@ -485,23 +631,22 @@ elif menu == "🔍 Statutory Audit":
 
     st.subheader("Audit Checklist")
     checklist = [
-        ("CMA Article 25 – Client funds segregated in Insurance Brokerage Account", True),
+        ("CMA Article 25 – Client funds segregated (Account 1000)", True),
         ("CMA Article 26 – Minimum net assets ≥ RO 50,000 (excl. intangibles)", True),
-        ("IFRS 15 – Commission revenue recognised on policy binding (point-in-time)", True),
+        ("IFRS 15 – Commission revenue recognised on policy binding", True),
         ("IFRS 9 – ECL allowance computed on commission receivables", st.session_state.ecl_allowance > 0),
-        ("IFRS 16 – Lease ROU asset and liability recognised", st.session_state.lease is not None),
+        ("IFRS 16 – Lease ROU asset & liability recognised", st.session_state.lease is not None),
         ("VAT – Output VAT 5% applied to commission income", True),
     ]
     for item, done in checklist:
         st.write(("✅" if done else "⬜") + " " + item)
 
-# -------------------------------------------------------------------
+# =====================================================================
 # REPORTS
-# -------------------------------------------------------------------
+# =====================================================================
 elif menu == "📑 Reports":
     st.title("Financial Reports")
 
-    # FS
     st.header("Statement of Financial Position")
     assets = {k: v for k, v in st.session_state.balances.items() if k.startswith("1") and k != "1000"}
     liabs = {k: v for k, v in st.session_state.balances.items() if k.startswith("2")}
@@ -535,42 +680,75 @@ elif menu == "📑 Reports":
     st.markdown(f"## Net Profit: {fmt(sum(rev.values()) - sum(exp.values()))}")
 
     st.divider()
-    st.subheader("Export")
-    excel_buf = io.BytesIO()
-    with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as w:
-        pd.DataFrame([{"Code": k, "Account": v, "Balance": st.session_state.balances[k]}
-                      for k, v in CHART_OF_ACCOUNTS.items()]).to_excel(w, sheet_name="Trial Balance", index=False)
-        if st.session_state.journal_entries:
-            rows = []
-            for je in st.session_state.journal_entries:
-                for l in je["lines"]:
-                    rows.append({"Date": je["date"], "Desc": je["description"],
-                                 "Account": l["account"], "Debit": l["debit"], "Credit": l["credit"]})
-            pd.DataFrame(rows).to_excel(w, sheet_name="Journal", index=False)
-    st.download_button("📊 Excel", excel_buf.getvalue(), f"fs_{date.today()}.xlsx")
+    st.subheader("📥 Export Reports")
+    c1, c2, c3 = st.columns(3)
 
-# -------------------------------------------------------------------
+    with c1:
+        excel_buf = generate_excel_report()
+        st.download_button("📊 Excel (TB / Journal / P&L / Lease)",
+                           data=excel_buf,
+                           file_name=f"oman_broker_reports_{date.today()}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    with c2:
+        if REPORTLAB_OK:
+            pdf_buf = io.BytesIO()
+            doc = SimpleDocTemplate(pdf_buf, pagesize=A4)
+            styles = getSampleStyleSheet()
+            total_assets = sum(assets.values())
+            total_liab = sum(liabs.values())
+            total_rev = sum(rev.values())
+            total_exp = sum(exp.values())
+            net_profit = total_rev - total_exp
+            elements = [
+                Paragraph("<b>Financial Summary</b>",
+                          ParagraphStyle('T', parent=styles['Heading1'], alignment=TA_CENTER)),
+                Spacer(1, 20),
+                Paragraph(f"Total Assets: {fmt(total_assets)}", styles['Normal']),
+                Paragraph(f"Total Liabilities: {fmt(total_liab)}", styles['Normal']),
+                Paragraph(f"Net Assets: {fmt(total_assets - total_liab)}", styles['Normal']),
+                Spacer(1, 10),
+                Paragraph(f"Revenue: {fmt(total_rev)}", styles['Normal']),
+                Paragraph(f"Expenses: {fmt(total_exp)}", styles['Normal']),
+                Paragraph(f"Net Profit: {fmt(net_profit)}", styles['Normal']),
+            ]
+            doc.build(elements)
+            pdf_buf.seek(0)
+            st.download_button("📄 PDF Summary",
+                               data=pdf_buf,
+                               file_name=f"oman_broker_summary_{date.today()}.pdf",
+                               mime="application/pdf")
+        else:
+            st.info("Install reportlab to enable PDF export.")
+
+    with c3:
+        if PPTX_OK:
+            pptx_buf = generate_pptx_report()
+            st.download_button("📽️ PowerPoint",
+                               data=pptx_buf,
+                               file_name=f"oman_broker_summary_{date.today()}.pptx",
+                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        else:
+            st.info("Install python-pptx to enable PPTX export.")
+
+# =====================================================================
 # IFRS NOTES
-# -------------------------------------------------------------------
+# =====================================================================
 elif menu == "📚 IFRS Notes":
     st.title("IFRS & CMA Notes")
     st.markdown("""
-    ### Accruals (IFRS 15)
-    Commission income is recognised when the policy is **bound** (point-in-time), not when cash is received. 
-    Claims handling services may be recognised over time [citation:1][citation:21].
+**Accruals (IFRS 15)** – Commission recognised when policy is **bound**, not when cash received.
 
-    ### ECL (IFRS 9)
-    Simplified approach: provision matrix based on days past due. ECL = Gross receivable × loss rate [citation:12].
+**ECL (IFRS 9)** – Simplified approach: provision matrix over days past due. ECL = Gross × loss rate.
 
-    ### Lease (IFRS 16)
-    ROU asset = PV of lease payments. Depreciation (straight-line) + interest (effective rate) replace rent expense [citation:23].
+**Lease (IFRS 16)** – ROU asset = PV of lease payments. Depreciation (straight-line) + interest (effective rate) replace rent expense.
 
-    ### CMA Audit (Article 16 / 27)
-    Auditor must be **CMA-accredited**. CMA may inspect books and appoint external auditor [citation:4][citation:9].
+**Statutory audit** – CMA requires auditor accredited by the Authority; may inspect books and appoint external auditor.
 
-    ### CMA Article 25
-    Client funds in "Insurance Brokerage Account" are **excluded** from the broker's own balance sheet [citation:9].
+**CMA Article 25** – Client funds held in segregated "Insurance Brokerage Account" and **excluded** from broker's balance sheet.
 
-    ### CMA Article 26
-    Minimum net assets: **RO 50,000** (insurance OR reinsurance) / **RO 75,000** (combined). Excludes intangibles [citation:14].
+**CMA Article 26** – Minimum net assets: **RO 50,000** (insurance OR reinsurance) or **RO 75,000** (combined), excluding intangibles.
+
+**VAT (Oman)** – 5% VAT on commission services; premiums handled as disclosed agent are out of scope.
     """)
+    st.warning("Demo only – not a substitute for statutory audit or professional advice.")
